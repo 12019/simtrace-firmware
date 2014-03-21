@@ -59,10 +59,12 @@ static void sw_sim_irq(u_int32_t pio)
 
 static void vcc_phone_irq(u_int32_t pio)
 {
-	if (!AT91F_PIO_IsInputSet(AT91C_BASE_PIOA, SIMTRACE_PIO_VCC_PHONE))
+	if (!AT91F_PIO_IsInputSet(AT91C_BASE_PIOA, SIMTRACE_PIO_VCC_PHONE)) {
 		DEBUGPCR("VCC_PHONE off");
-	else
+		iso_uart_flush();
+	} else {
 		DEBUGPCR("VCC_PHONE on");
+	}
 }
 
 void sim_switch_init(void)

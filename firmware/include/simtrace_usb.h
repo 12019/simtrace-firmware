@@ -3,11 +3,16 @@
 
 //#include <stdint.h>
 
-/* this is kept compatible with OpenPCD protocol */
+/* this WAS compatible with OpenPCD protocol
+ * NOW modified to add apdu_offset and total_length
+ */
 struct simtrace_hdr {
 	u_int8_t cmd;
 	u_int8_t flags;
 	u_int8_t res[2];
+	u_int16_t seq_num;
+	u_int16_t offset;
+	u_int16_t tot_len;
 	u_int8_t data[0];
 } __attribute__ ((packed));
 

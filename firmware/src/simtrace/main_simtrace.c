@@ -134,10 +134,37 @@ static int simtrace_usb_in(struct req_ctx *rctx)
 		req_ctx_set_state(rctx, RCTX_STATE_FREE);
 		break;
 	}
+	return 0;
+}
+
+static volatile unsigned SPUIRQ_PC, SPUIRQ_COUNT = 0;
+
+void check_spurious_irq() {
+	static unsigned last_count = 0;
+	if (last_count != SPUIRQ_COUNT) {
+		DEBUGPCR("SPURRIOUS IRQ %i [Old PC = %08X]", SPUIRQ_COUNT, SPUIRQ_PC);
+		last_count = SPUIRQ_COUNT;
+	}
+}
+
+void custom_spurious_handler(unsigned previous_pc) {
+	unsigned flags;
+	local_irq_save(flags);
+	SPUIRQ_PC = previous_pc;
+	SPUIRQ_COUNT++;
+	local_irq_restore(flags);
+}
+
+void custom_spurious_entry(void) {
+	register unsigned *previous_pc asm("r0");
+	asm("ADD R1, SP, #16; LDR R0, [R1]");
+	custom_spurious_handler(previous_pc);
 }
 
 void _init_func(void)
 {
+	AT91C_BASE_AIC->AIC_SPU = (int)custom_spurious_entry;
+
 	/* low-level hardware initialization */
 	pio_irq_init();
 	iso_uart_init();
@@ -218,6 +245,8 @@ int _main_dbgu(char key)
 
 void _main_func(void)
 {
+  	static unsigned loopLow = 0, loopHigh = 0;
+
 	/* first we try to get rid of pending to-be-sent stuff */
 	usb_out_process();
 
@@ -225,4 +254,15 @@ void _main_func(void)
 	usb_in_process();
 
 	udp_unthrottle();
+
+       	if ((loopLow & 0xFFFF) == 0) {
+		DEBUGPCR("Heart beat %08X", loopHigh++);
+	}
+	if ((loopLow & 0x3F) == 0) {
+		iso_uart_idleflush();
+	}
+	loopLow++;
+
+	iso_uart_report_errors();
+	check_spurious_irq();
 }

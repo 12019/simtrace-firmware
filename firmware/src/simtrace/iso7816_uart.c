@@ -23,6 +23,7 @@
 #include <AT91SAM7.h>
 #include <lib_AT91SAM7.h>
 #include <openpcd.h>
+#include <asm/system.h>
 
 #include <simtrace_usb.h>
 
@@ -125,6 +126,20 @@ static const u_int8_t di_table[] = {
 	12, 20, 2, 4, 8, 16, 32, 64,
 };
 
+void iso_uart_report_errors(void) 
+{
+	static unsigned lastOverrun = 0, lastParity = 0, lastFrame = 0;
+	if (isoh.stats.overrun != lastOverrun) {
+		DEBUGPCR("UART overrun: %u", lastOverrun = isoh.stats.overrun);
+	}
+	if (isoh.stats.frame_err != lastFrame) {
+		DEBUGPCR("UART frame error: %u", lastFrame = isoh.stats.frame_err);
+	}
+	if (isoh.stats.parity_err != lastParity) {
+		DEBUGPCR("UART parity error: %u", lastParity = isoh.stats.parity_err);
+	}
+}
+
 void iso_uart_stats_dump(void)
 {
 	DEBUGPCRF("no_rctx: %u, rctx_sent: %u, rst: %u, pps: %u, bytes: %u, "
@@ -188,23 +203,29 @@ static void refill_rctx(struct iso7816_3_handle *ih)
 
 static void send_rctx(struct iso7816_3_handle *ih)
 {
+	static u_int16_t seq_num = 0;
 	struct req_ctx *rctx = ih->rctx;
+	unsigned flags;
 
 	if (!rctx)
 		return;
 
+	local_irq_save(flags);
 	/* Put Fi and Di into res[2] array */
 	ih->sh.res[0] = ih->fi;
 	ih->sh.res[1] = ih->di;
 
+	ih->sh.seq_num = seq_num++;
+	ih->sh.offset = 0;
+	ih->sh.tot_len = rctx->tot_len;
+
 	/* copy the simtrace header */
 	memcpy(rctx->data, &ih->sh, sizeof(ih->sh));
+	ih->sh.flags = 0;
+	ih->rctx = NULL;
+	local_irq_restore(flags);
 
 	req_ctx_set_state(rctx, RCTX_STATE_UDP_EP2_PENDING);
-
-	memset(&ih->sh, 0, sizeof(ih->sh));
-	ih->rctx = NULL;
-
 	ih->stats.rctx_sent++;
 }
 
@@ -567,6 +588,23 @@ void iso7816_wtime_expired(void)
 	set_state(&isoh, ISO7816_S_WAIT_APDU);
 }
 
+void iso_uart_flush(void) {
+	send_rctx(&isoh);
+}
+
+void iso_uart_idleflush(void) {
+	static struct req_ctx *last_req = NULL;
+	static u_int16_t last_len = 0;
+	if (last_req == isoh.rctx &&
+        	last_len == isoh.rctx->tot_len &&
+		req_ctx_count(RCTX_STATE_UDP_EP2_PENDING) == 0 &&
+		(isoh.sh.flags & SIMTRACE_FLAG_ATR) == 0) {
+		send_rctx(&isoh);
+	}
+	last_req = isoh.rctx;
+	last_len = isoh.rctx->tot_len;
+}
+
 static __ramfunc void usart_irq(void)
 {
 	u_int32_t csr = usart->US_CSR;
@@ -588,7 +626,7 @@ static __ramfunc void usart_irq(void)
 	if (csr & (AT91C_US_PARE|AT91C_US_FRAME|AT91C_US_OVRE)) {
 		u_int8_t nb_err = usart->US_NER;
 		/* FIXME: some error has occurrerd */
-		//DEBUGP("NER=%02x ", nb_err);
+		// DEBUGP("NER=%02x ", nb_err);
 		/* clear the status */
 		usart->US_CR |= AT91C_US_RSTSTA;
 
@@ -600,7 +638,7 @@ static __ramfunc void usart_irq(void)
 			isoh.stats.overrun++;
 	}
 
-	if (csr & AT91C_US_INACK) {
+	if (csr & AT91C_US_NACK) {
 		/* we would have sent a NACK if INACK was not set */
 		usart->US_CR |= AT91C_US_RSTNACK;
 	}
@@ -609,10 +647,13 @@ static __ramfunc void usart_irq(void)
 /* handler for the RST input pin state change */
 static void reset_pin_irq(u_int32_t pio)
 {
+	// When ever reset occured, we make sure to flush out any populated req_ctx
 	if (!AT91F_PIO_IsInputSet(AT91C_BASE_PIOA, pio)) {
+		iso_uart_flush();
 		DEBUGPCR("nRST");
 		set_state(&isoh, ISO7816_S_RESET);
 	} else {
+		iso_uart_flush();
 		DEBUGPCR("RST");
 		set_state(&isoh, ISO7816_S_WAIT_ATR);
 		isoh.stats.rst++;
@@ -675,6 +716,8 @@ void iso_uart_init(void)
 {
 	DEBUGPCR("USART Initializing");
 
+	memset(&isoh, 0, sizeof(isoh));
+
 	refill_rctx(&isoh);
 
 	/* make sure we get clock from the power management controller */
@@ -698,7 +741,8 @@ void iso_uart_init(void)
 	/* ISO7816 T=0 mode with external clock input */
 	usart->US_MR = AT91C_US_USMODE_ISO7816_0 | AT91C_US_CLKS_EXT | 
 			AT91C_US_CHRL_8_BITS | AT91C_US_NBSTOP_1_BIT |
-			AT91C_US_CKLO | AT91C_US_INACK;
+			AT91C_US_CKLO | AT91C_US_INACK |
+			AT91C_US_OVER;
 
 	/* Disable all interrupts */
 	usart->US_IDR = 0xff;
